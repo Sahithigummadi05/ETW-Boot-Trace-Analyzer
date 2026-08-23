@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!--
+      net8.0 alone gives you the full offline pipeline (ingest a previously captured .csv/.json/
+      .sqlite export, run correlation, print the report) on any OS. The net8.0-windows leg adds
+      live ETW session capture (EtwBootTraceAnalyzer.Capture, which needs the real StartTrace/
+      ProcessTrace Windows APIs) and is only meaningful when actually run on Windows.
+    -->
+    <TargetFrameworks>net8.0;net8.0-windows</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <DefineConstants>$(DefineConstants);ETW_CAPTURE</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EtwBootTraceAnalyzer.Core\EtwBootTraceAnalyzer.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <ProjectReference Include="..\EtwBootTraceAnalyzer.Capture\EtwBootTraceAnalyzer.Capture.csproj" />
+  </ItemGroup>
+
+</Project>

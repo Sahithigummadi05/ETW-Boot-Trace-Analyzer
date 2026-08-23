@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\EtwBootTraceAnalyzer.Core\EtwBootTraceAnalyzer.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!--
+      TraceEvent P/Invokes native ETW APIs (StartTrace/ProcessTrace/OpenTrace) that only exist on
+      Windows. Targeting net8.0-windows keeps that dependency honest at build time instead of
+      failing at run time on other platforms. This project intentionally does not build on
+      non-Windows hosts; EtwBootTraceAnalyzer.Cli depends on it, so on Linux/macOS build the Cli
+      with -p:SkipWindowsCapture=true (see EtwBootTraceAnalyzer.Cli.csproj) which drops this
+      reference and exposes only file-based ingestion (CSV/JSON/SQLite), still enough to run the
+      full analysis pipeline against a previously exported trace.
+    -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.16" />
+  </ItemGroup>
+
+</Project>
