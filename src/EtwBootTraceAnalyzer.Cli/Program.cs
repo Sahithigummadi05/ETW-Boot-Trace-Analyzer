@@ -22,6 +22,8 @@ try
             return RunDemo(args[1..]);
         case "analyze":
             return RunAnalyze(args[1..]);
+        case "compare":
+            return RunCompare(args[1..]);
 #if ETW_CAPTURE
         case "capture":
             return RunCapture(args[1..]);
@@ -46,7 +48,11 @@ catch (Exception ex)
 static int RunDemo(string[] args)
 {
     var trace = SyntheticBootTraceGenerator.Generate();
-    AnalyzeAndPrint(trace, milestoneProcess: null);
+    var report = Analyze(trace, milestoneProcess: null);
+    if (report is not null)
+    {
+        ConsoleReportPrinter.Print(trace, report);
+    }
 
     var saveJson = GetOption(args, "--save-json");
     if (saveJson is not null)
@@ -68,37 +74,83 @@ static int RunDemo(string[] args)
 
 static int RunAnalyze(string[] args)
 {
-    var jsonPath = GetOption(args, "--json");
-    var sqlitePath = GetOption(args, "--sqlite");
-    var sessionName = GetOption(args, "--session");
-    var milestoneProcess = GetOption(args, "--milestone-process");
-
-    BootTrace trace;
-    if (jsonPath is not null)
+    var trace = LoadTraceOrNull(args);
+    if (trace is null)
     {
-        trace = JsonTraceIo.Import(jsonPath);
-    }
-    else if (sqlitePath is not null)
-    {
-        if (sessionName is null)
-        {
-            Console.Error.WriteLine("--session is required when loading from --sqlite.");
-            return 1;
-        }
-        using var store = new SqliteTraceStore(sqlitePath);
-        trace = store.Load(sessionName);
-    }
-    else
-    {
-        Console.Error.WriteLine("Specify a trace to analyze with --json <path> or --sqlite <path> --session <name>.");
         return 1;
     }
 
-    AnalyzeAndPrint(trace, milestoneProcess);
+    var report = Analyze(trace, GetOption(args, "--milestone-process"));
+    if (report is null)
+    {
+        return 1;
+    }
+
+    ConsoleReportPrinter.Print(trace, report);
     return 0;
 }
 
-static void AnalyzeAndPrint(BootTrace trace, string? milestoneProcess)
+static int RunCompare(string[] args)
+{
+    var beforePath = GetOption(args, "--before") ?? throw new ArgumentException("--before <path.json|path.db> is required.");
+    var afterPath = GetOption(args, "--after") ?? throw new ArgumentException("--after <path.json|path.db> is required.");
+    var milestoneProcess = GetOption(args, "--milestone-process");
+
+    var beforeTrace = LoadTraceFromPath(beforePath, GetOption(args, "--before-session"));
+    var afterTrace = LoadTraceFromPath(afterPath, GetOption(args, "--after-session"));
+
+    var beforeReport = Analyze(beforeTrace, milestoneProcess);
+    var afterReport = Analyze(afterTrace, milestoneProcess);
+    if (beforeReport is null || afterReport is null)
+    {
+        return 1;
+    }
+
+    var comparison = TraceComparer.Compare(beforeReport, afterReport);
+    ConsoleReportPrinter.PrintComparison(comparison);
+    return 0;
+}
+
+static BootTrace? LoadTraceOrNull(string[] args)
+{
+    var jsonPath = GetOption(args, "--json");
+    var sqlitePath = GetOption(args, "--sqlite");
+
+    if (jsonPath is not null)
+    {
+        return JsonTraceIo.Import(jsonPath);
+    }
+    if (sqlitePath is not null)
+    {
+        var sessionName = GetOption(args, "--session");
+        if (sessionName is null)
+        {
+            Console.Error.WriteLine("--session is required when loading from --sqlite.");
+            return null;
+        }
+        using var store = new SqliteTraceStore(sqlitePath);
+        return store.Load(sessionName);
+    }
+
+    Console.Error.WriteLine("Specify a trace with --json <path> or --sqlite <path> --session <name>.");
+    return null;
+}
+
+static BootTrace LoadTraceFromPath(string path, string? sessionName)
+{
+    if (path.EndsWith(".db", StringComparison.OrdinalIgnoreCase) || path.EndsWith(".sqlite", StringComparison.OrdinalIgnoreCase))
+    {
+        if (sessionName is null)
+        {
+            throw new ArgumentException($"A --*-session name is required to load '{path}' from SQLite.");
+        }
+        using var store = new SqliteTraceStore(path);
+        return store.Load(sessionName);
+    }
+    return JsonTraceIo.Import(path);
+}
+
+static BootAnalysisReport? Analyze(BootTrace trace, string? milestoneProcess)
 {
     var milestone = milestoneProcess is not null
         ? MilestoneSelector.FirstReadyForProcess(trace, milestoneProcess)
@@ -108,14 +160,13 @@ static void AnalyzeAndPrint(BootTrace trace, string? milestoneProcess)
     {
         Console.Error.WriteLine(
             milestoneProcess is not null
-                ? $"No process matching '{milestoneProcess}' was ever readied in this trace."
-                : "This trace has no ReadyThread events to build a critical path from.");
-        return;
+                ? $"No process matching '{milestoneProcess}' was ever readied in trace '{trace.SessionName}'."
+                : $"Trace '{trace.SessionName}' has no ReadyThread events to build a critical path from.");
+        return null;
     }
 
     var engine = new BootAnalysisEngine();
-    var report = engine.Analyze(trace, milestone.AwakenedThreadId, milestone.TimestampMs);
-    ConsoleReportPrinter.Print(trace, report);
+    return engine.Analyze(trace, milestone.AwakenedThreadId, milestone.TimestampMs);
 }
 
 #if ETW_CAPTURE
@@ -187,6 +238,12 @@ static void PrintUsage()
           etwboot analyze --sqlite <path> --session <name> [--milestone-process <name>]
               Analyze a previously captured/exported trace. Without --milestone-process, the
               last thread readied in the trace is used as the boot-complete milestone.
+
+          etwboot compare --before <path> --after <path> [--milestone-process <name>]
+              [--before-session <name>] [--after-session <name>]
+              Diff two independently-analyzed traces (e.g. before/after a fix) and report the
+              change in critical-path time, overall and per offending process. Paths ending in
+              .db/.sqlite need the matching --before-session/--after-session.
         """);
 #if ETW_CAPTURE
     Console.WriteLine("""

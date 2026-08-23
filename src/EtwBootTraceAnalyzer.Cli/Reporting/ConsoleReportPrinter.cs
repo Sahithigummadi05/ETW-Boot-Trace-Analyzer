@@ -58,4 +58,20 @@ internal static class ConsoleReportPrinter
             }
         }
     }
+
+    public static void PrintComparison(TraceComparison comparison)
+    {
+        Console.WriteLine(
+            $"Critical path: {comparison.BeforeCriticalPathMs:F0} ms -> {comparison.AfterCriticalPathMs:F0} ms " +
+            $"({(comparison.ImprovementMs >= 0 ? "-" : "+")}{Math.Abs(comparison.ImprovementMs):F0} ms, " +
+            $"{comparison.ImprovementPercent:F1}% {(comparison.ImprovementPercent >= 0 ? "faster" : "slower")})");
+        Console.WriteLine();
+
+        Console.WriteLine("Per-process change (matched by process name - see caveat in TraceComparison):");
+        foreach (var d in comparison.OffenderDeltas.Take(15))
+        {
+            var arrow = d.DeltaMs < 0 ? "down" : d.DeltaMs > 0 ? "up" : "same";
+            Console.WriteLine($"  {d.ProcessName,-32} {d.BeforeMs,7:F0} ms -> {d.AfterMs,7:F0} ms  ({arrow} {Math.Abs(d.DeltaMs):F0} ms)");
+        }
+    }
 }

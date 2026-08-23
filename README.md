@@ -71,7 +71,18 @@ dotnet run --project src/EtwBootTraceAnalyzer.Cli -- analyze --sqlite trace.db -
 
 # Pick a specific milestone instead of "last thread readied in the trace".
 dotnet run --project src/EtwBootTraceAnalyzer.Cli -- analyze --json trace.json --milestone-process explorer.exe
+
+# Diff two independently-captured traces (e.g. before/after applying a fix) to get an actual
+# improvement number, not just "where did the time go in this one boot".
+dotnet run --project src/EtwBootTraceAnalyzer.Cli -- compare --before before.json --after after.json
 ```
+
+`analyze` only ever tells you where the time went in *one* trace - the "82% of the critical path"
+kind of number. It says nothing about whether a fix helped. `compare` is what answers that: it
+diffs two `BootAnalysisReport`s (matched by process name, since pids aren't stable across boots)
+and reports the change in total critical-path time plus the per-process delta. That's the
+distinction between "found 3 services responsible for 40% of boot delay" (an `analyze` claim) and
+"reduced boot time by X%" (a `compare` claim) - the second one needs two real captures, not one.
 
 On Windows (`dotnet run -f net8.0-windows`), two more commands are available:
 
