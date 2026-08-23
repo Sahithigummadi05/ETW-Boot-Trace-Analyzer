@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore EtwBootTraceAnalyzer.sln
+
+      - name: Build
+        run: dotnet build EtwBootTraceAnalyzer.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test tests/EtwBootTraceAnalyzer.Tests/EtwBootTraceAnalyzer.Tests.csproj --configuration Release --no-build --verbosity normal
+
+      - name: Smoke test - run the CLI against the synthetic trace
+        run: dotnet run --project src/EtwBootTraceAnalyzer.Cli --framework net8.0 --configuration Release --no-build -- demo

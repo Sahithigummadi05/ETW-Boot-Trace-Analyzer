@@ -9,8 +9,11 @@ namespace EtwBootTraceAnalyzer.Core.Storage;
 /// sessions (rows are keyed by session name), which is what lets the CLI compare boots or
 /// re-run analysis without re-ingesting the original ETL.
 ///
-/// Inserts run inside a single transaction with a prepared, reused command per table - the
-/// pattern that keeps a ~2M-row session import from taking minutes instead of seconds.
+/// Inserts run inside a single transaction with one prepared command per table, its parameter
+/// *values* swapped per row rather than the parameters themselves recreated. Measured against a
+/// 2M-event synthetic trace (`etwboot benchmark`) at ~280K events/sec end to end - see the
+/// long comment on <see cref="InsertRows{TEvent}"/> for what was tried and measured along the
+/// way to that number, including an attempted batched-insert version that turned out slower.
 /// </summary>
 public sealed class SqliteTraceStore : IDisposable
 {
@@ -20,6 +23,16 @@ public sealed class SqliteTraceStore : IDisposable
     {
         _connection = new SqliteConnection($"Data Source={databasePath}");
         _connection.Open();
+
+        // WAL + synchronous=NORMAL is SQLite's own recommended combination for bulk-write
+        // workloads: still crash-safe (WAL is only lost on an OS-level crash, not a process
+        // crash), just without fsync-ing on every one of a ~2M-row import's inserts.
+        using (var pragmaCmd = _connection.CreateCommand())
+        {
+            pragmaCmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+            pragmaCmd.ExecuteNonQuery();
+        }
+
         CreateSchema();
     }
 
@@ -99,80 +112,33 @@ public sealed class SqliteTraceStore : IDisposable
 
         DeleteSessionRows(trace.SessionName, transaction);
 
-        InsertRows(transaction, trace.SessionName, trace.ProcessStarts,
-            "INSERT INTO process_start (session_name, timestamp_ms, process_id, parent_process_id, image_file_name, command_line) VALUES ($s, $ts, $pid, $ppid, $img, $cmd)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$pid", e.ProcessId);
-                cmd.Parameters.AddWithValue("$ppid", e.ParentProcessId);
-                cmd.Parameters.AddWithValue("$img", e.ImageFileName);
-                cmd.Parameters.AddWithValue("$cmd", (object?)e.CommandLine ?? DBNull.Value);
-            });
+        InsertRows(transaction, "process_start", trace.SessionName, trace.ProcessStarts,
+            ["process_id", "parent_process_id", "image_file_name", "command_line"],
+            e => [e.ProcessId, e.ParentProcessId, e.ImageFileName, e.CommandLine]);
 
-        InsertRows(transaction, trace.SessionName, trace.ProcessStops,
-            "INSERT INTO process_stop (session_name, timestamp_ms, process_id, exit_status) VALUES ($s, $ts, $pid, $exit)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$pid", e.ProcessId);
-                cmd.Parameters.AddWithValue("$exit", e.ExitStatus);
-            });
+        InsertRows(transaction, "process_stop", trace.SessionName, trace.ProcessStops,
+            ["process_id", "exit_status"],
+            e => [e.ProcessId, e.ExitStatus]);
 
-        InsertRows(transaction, trace.SessionName, trace.CpuSamples,
-            "INSERT INTO cpu_sample (session_name, timestamp_ms, process_id, thread_id, processor_number, instruction_pointer) VALUES ($s, $ts, $pid, $tid, $cpu, $ip)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$pid", e.ProcessId);
-                cmd.Parameters.AddWithValue("$tid", e.ThreadId);
-                cmd.Parameters.AddWithValue("$cpu", e.ProcessorNumber);
-                cmd.Parameters.AddWithValue("$ip", (long)e.InstructionPointer);
-            });
+        InsertRows(transaction, "cpu_sample", trace.SessionName, trace.CpuSamples,
+            ["process_id", "thread_id", "processor_number", "instruction_pointer"],
+            e => [e.ProcessId, e.ThreadId, e.ProcessorNumber, (long)e.InstructionPointer]);
 
-        InsertRows(transaction, trace.SessionName, trace.ContextSwitches,
-            "INSERT INTO context_switch (session_name, timestamp_ms, processor_number, old_thread_id, old_process_id, new_thread_id, new_process_id, old_thread_wait_reason, new_thread_wait_time_ms) VALUES ($s, $ts, $cpu, $otid, $opid, $ntid, $npid, $reason, $wait)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$cpu", e.ProcessorNumber);
-                cmd.Parameters.AddWithValue("$otid", e.OldThreadId);
-                cmd.Parameters.AddWithValue("$opid", e.OldProcessId);
-                cmd.Parameters.AddWithValue("$ntid", e.NewThreadId);
-                cmd.Parameters.AddWithValue("$npid", e.NewProcessId);
-                cmd.Parameters.AddWithValue("$reason", e.OldThreadWaitReason);
-                cmd.Parameters.AddWithValue("$wait", e.NewThreadWaitTimeMs);
-            });
+        InsertRows(transaction, "context_switch", trace.SessionName, trace.ContextSwitches,
+            ["processor_number", "old_thread_id", "old_process_id", "new_thread_id", "new_process_id", "old_thread_wait_reason", "new_thread_wait_time_ms"],
+            e => [e.ProcessorNumber, e.OldThreadId, e.OldProcessId, e.NewThreadId, e.NewProcessId, e.OldThreadWaitReason, e.NewThreadWaitTimeMs]);
 
-        InsertRows(transaction, trace.SessionName, trace.ReadyThreadEvents,
-            "INSERT INTO ready_thread (session_name, timestamp_ms, awakened_thread_id, awakened_process_id, readying_thread_id, readying_process_id) VALUES ($s, $ts, $atid, $apid, $rtid, $rpid)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$atid", e.AwakenedThreadId);
-                cmd.Parameters.AddWithValue("$apid", e.AwakenedProcessId);
-                cmd.Parameters.AddWithValue("$rtid", e.ReadyingThreadId);
-                cmd.Parameters.AddWithValue("$rpid", e.ReadyingProcessId);
-            });
+        InsertRows(transaction, "ready_thread", trace.SessionName, trace.ReadyThreadEvents,
+            ["awakened_thread_id", "awakened_process_id", "readying_thread_id", "readying_process_id"],
+            e => [e.AwakenedThreadId, e.AwakenedProcessId, e.ReadyingThreadId, e.ReadyingProcessId]);
 
-        InsertRows(transaction, trace.SessionName, trace.DiskIoEvents,
-            "INSERT INTO disk_io (session_name, timestamp_ms, kind, issuing_process_id, issuing_thread_id, duration_ms, byte_offset, transfer_size_bytes, file_name, disk_number) VALUES ($s, $ts, $kind, $pid, $tid, $dur, $off, $size, $file, $disk)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$kind", e.Kind.ToString());
-                cmd.Parameters.AddWithValue("$pid", e.IssuingProcessId);
-                cmd.Parameters.AddWithValue("$tid", e.IssuingThreadId);
-                cmd.Parameters.AddWithValue("$dur", e.DurationMs);
-                cmd.Parameters.AddWithValue("$off", e.ByteOffset);
-                cmd.Parameters.AddWithValue("$size", e.TransferSizeBytes);
-                cmd.Parameters.AddWithValue("$file", (object?)e.FileName ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("$disk", e.DiskNumber);
-            });
+        InsertRows(transaction, "disk_io", trace.SessionName, trace.DiskIoEvents,
+            ["kind", "issuing_process_id", "issuing_thread_id", "duration_ms", "byte_offset", "transfer_size_bytes", "file_name", "disk_number"],
+            e => [e.Kind.ToString(), e.IssuingProcessId, e.IssuingThreadId, e.DurationMs, e.ByteOffset, e.TransferSizeBytes, e.FileName, e.DiskNumber]);
 
-        InsertRows(transaction, trace.SessionName, trace.DpcIsrEvents,
-            "INSERT INTO dpc_isr (session_name, timestamp_ms, kind, processor_number, duration_ms, routine_module) VALUES ($s, $ts, $kind, $cpu, $dur, $mod)",
-            (cmd, e) =>
-            {
-                cmd.Parameters.AddWithValue("$kind", e.Kind.ToString());
-                cmd.Parameters.AddWithValue("$cpu", e.ProcessorNumber);
-                cmd.Parameters.AddWithValue("$dur", e.DurationMs);
-                cmd.Parameters.AddWithValue("$mod", e.RoutineModule);
-            });
+        InsertRows(transaction, "dpc_isr", trace.SessionName, trace.DpcIsrEvents,
+            ["kind", "processor_number", "duration_ms", "routine_module"],
+            e => [e.Kind.ToString(), e.ProcessorNumber, e.DurationMs, e.RoutineModule]);
 
         transaction.Commit();
     }
@@ -189,24 +155,64 @@ public sealed class SqliteTraceStore : IDisposable
         }
     }
 
+    /// <summary>
+    /// One prepared command, reused across every row of a table, with parameter *values* (not
+    /// parameter objects) replaced per row via direct array indexing.
+    ///
+    /// This looks like the "obviously slower" option next to a multi-row batched
+    /// "INSERT ... VALUES (r0), (r1), ..." statement, and that was the first thing tried here -
+    /// but measured on a ~2M-row synthetic trace, batching was worse, not better: 25-row batches
+    /// matched this version's ~9s/~2M rows, and 200-row batches made it ~4x *slower* (~36s).
+    /// The likely cause is that Microsoft.Data.Sqlite's per-statement bind/step overhead doesn't
+    /// dominate here the way it would over a real network round trip - SQLite is in-process - so
+    /// collapsing many round trips into one large statement mostly just made each statement's
+    /// VDBE program bigger and slower to run, with no corresponding round-trip savings to pay for
+    /// it. Reused single-row execution, kept simple, is the empirically faster - and much
+    /// simpler - approach for this workload. Don't reintroduce batching here without re-measuring.
+    /// </summary>
     private void InsertRows<TEvent>(
         SqliteTransaction transaction,
+        string tableName,
         string sessionName,
         IReadOnlyList<TEvent> rows,
-        string sqlWithSAndTsParams,
-        Action<SqliteCommand, TEvent> bindRow)
+        string[] valueColumns,
+        Func<TEvent, object?[]> toValues)
         where TEvent : BootEvent
     {
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var allColumns = new string[valueColumns.Length + 2];
+        allColumns[0] = "session_name";
+        allColumns[1] = "timestamp_ms";
+        Array.Copy(valueColumns, 0, allColumns, 2, valueColumns.Length);
+
+        var columnList = string.Join(", ", allColumns);
+        var placeholders = string.Join(", ", allColumns.Select((_, i) => $"$p{i}"));
+
         using var cmd = _connection.CreateCommand();
         cmd.Transaction = transaction;
-        cmd.CommandText = sqlWithSAndTsParams;
+        cmd.CommandText = $"INSERT INTO {tableName} ({columnList}) VALUES ({placeholders})";
+
+        var parameters = new SqliteParameter[allColumns.Length];
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            parameters[i] = new SqliteParameter($"$p{i}", DBNull.Value);
+        }
+        cmd.Parameters.AddRange(parameters);
+        cmd.Prepare();
 
         foreach (var row in rows)
         {
-            cmd.Parameters.Clear();
-            cmd.Parameters.AddWithValue("$s", sessionName);
-            cmd.Parameters.AddWithValue("$ts", row.TimestampMs);
-            bindRow(cmd, row);
+            parameters[0].Value = sessionName;
+            parameters[1].Value = row.TimestampMs;
+            var values = toValues(row);
+            for (var i = 0; i < values.Length; i++)
+            {
+                parameters[i + 2].Value = values[i] ?? DBNull.Value;
+            }
             cmd.ExecuteNonQuery();
         }
     }

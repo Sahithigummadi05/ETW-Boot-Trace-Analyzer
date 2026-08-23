@@ -1,5 +1,7 @@
 # EtwBootTraceAnalyzer
 
+![CI](https://github.com/Sahithigummadi05/project1/actions/workflows/ci.yml/badge.svg?branch=claude/etw-boot-trace-analyzer-ajb2p9)
+
 Attributes boot (or app-launch) latency to the specific processes and drivers that caused it,
 from an ETW trace. Rather than dumping the kernel event stream, it reconstructs a causal chain:
 
@@ -75,6 +77,10 @@ dotnet run --project src/EtwBootTraceAnalyzer.Cli -- analyze --json trace.json -
 # Diff two independently-captured traces (e.g. before/after applying a fix) to get an actual
 # improvement number, not just "where did the time go in this one boot".
 dotnet run --project src/EtwBootTraceAnalyzer.Cli -- compare --before before.json --after after.json
+
+# Generate a trace at real scale (~2M events by default) and time every stage of the pipeline -
+# see "Measured performance" below.
+dotnet run --project src/EtwBootTraceAnalyzer.Cli -- benchmark
 ```
 
 `analyze` only ever tells you where the time went in *one* trace - the "82% of the critical path"
@@ -108,6 +114,38 @@ etwboot import-etl boot.etl --out trace.json
    they don't, that's a bug in the correlation window or module resolution, not a difference in
    methodology.
 
+## Measured performance, not assumed performance
+
+`etwboot benchmark [--events <count>]` generates a synthetic trace at real scale - a genuine
+25-hop critical-path chain (disk-bound and CPU-bound hops, same shape as the demo fixture) buried
+inside ~2,000,000 unrelated background CPU-sample events - and times generation, critical-path
+analysis, and SQLite save/load against it. Run on this machine (`-c Release`, 2,000,101 events):
+
+| Stage | Time | Throughput |
+|---|---|---|
+| Generate + timestamp-sort | ~0.6-1.1s | - |
+| Critical-path analysis (the differentiator) | ~230-245ms | ~8.5M events/sec scanned |
+| SQLite save | ~7-9.5s | ~215-285K events/sec |
+| SQLite load | ~2.9-3.1s | - |
+
+Absolute numbers will vary by machine; what's worth taking from this is the *shape*: the
+critical-path walk - the actual novel part - stays under a quarter of a second at 2M events
+because it's indexed, not scanned; SQLite save/load dominates total wall-clock time, which is
+exactly what you'd expect from an I/O-bound step next to an in-memory one.
+
+**A real result, not a claimed one:** the SQLite writer went through two rounds of "obvious"
+optimizations before landing here. Reusing parameter *objects* across rows (instead of
+`Parameters.Clear()` + re-adding them every row) made no measurable difference. Batching many
+rows into one `INSERT ... VALUES (r0), (r1), ...` statement - the standard bulk-insert
+trick - was then *tried*, on the reasonable theory that fewer round trips should mean less
+overhead. Measured against the 2M-event benchmark, it was worse: a 25-row batch matched the
+simple version, and a 200-row batch was **~4x slower** (~36s vs ~9s), because SQLite is
+in-process here - there's no network round trip to amortize - so a bigger multi-row statement
+mostly just costs more per execute with no offsetting savings. That attempt was reverted; the
+comment on `SqliteTraceStore.InsertRows` documents why, so nobody reintroduces it on intuition
+without re-measuring. This is the point of building a benchmark at all: it turns "should be
+faster" into an answerable question.
+
 ## Data model notes (why fields are shaped the way they are)
 
 - Timestamps are milliseconds relative to trace start (`TimeStampRelativeMSec` in TraceEvent
@@ -131,7 +169,14 @@ etwboot import-etl boot.etl --out trace.json
 dotnet test tests/EtwBootTraceAnalyzer.Tests
 ```
 
-The synthetic fixture (`SyntheticBootTraceGenerator`) encodes a boot narrative with a known
-answer - a disk-bound service that should dominate the critical path (82% in the fixture) and a
-CPU-bound one that shouldn't - so the critical-path and ranking tests assert against exact
-expected durations and process attribution, not just "it doesn't throw."
+14 tests, also run automatically on every push via GitHub Actions (`.github/workflows/ci.yml`,
+which builds the whole solution and then runs `etwboot demo` as a smoke test). The synthetic
+fixture (`SyntheticBootTraceGenerator`) encodes a boot narrative with a known answer - a
+disk-bound service that should dominate the critical path (82% in the fixture) and a CPU-bound
+one that shouldn't - so the critical-path and ranking tests assert against exact expected
+durations and process attribution, not just "it doesn't throw." `TraceComparerTests` does the
+same for the before/after diff, using a "fixed" variant of the same fixture with a known
+improvement. `EdgeCaseTests` covers the things a hand-picked fixture doesn't: a cyclic wait-chain
+(two threads readying each other) terminating instead of looping forever, milestone selection
+against an empty or non-matching trace, and `LargeScaleTraceGenerator` producing something the
+analyzer can actually run against at scale.

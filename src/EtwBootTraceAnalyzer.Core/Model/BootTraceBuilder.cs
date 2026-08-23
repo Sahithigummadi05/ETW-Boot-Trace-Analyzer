@@ -34,12 +34,21 @@ public sealed class BootTraceBuilder
         SessionName = SessionName,
         BootStartUtc = BootStartUtc,
         CpuSampleIntervalMs = CpuSampleIntervalMs,
-        ProcessStarts = _processStarts.OrderBy(e => e.TimestampMs).ToList(),
-        ProcessStops = _processStops.OrderBy(e => e.TimestampMs).ToList(),
-        CpuSamples = _cpuSamples.OrderBy(e => e.TimestampMs).ToList(),
-        ContextSwitches = _contextSwitches.OrderBy(e => e.TimestampMs).ToList(),
-        ReadyThreadEvents = _readyThreadEvents.OrderBy(e => e.TimestampMs).ToList(),
-        DiskIoEvents = _diskIoEvents.OrderBy(e => e.TimestampMs).ToList(),
-        DpcIsrEvents = _dpcIsrEvents.OrderBy(e => e.TimestampMs).ToList(),
+        ProcessStarts = SortByTimestamp(_processStarts),
+        ProcessStops = SortByTimestamp(_processStops),
+        CpuSamples = SortByTimestamp(_cpuSamples),
+        ContextSwitches = SortByTimestamp(_contextSwitches),
+        ReadyThreadEvents = SortByTimestamp(_readyThreadEvents),
+        DiskIoEvents = SortByTimestamp(_diskIoEvents),
+        DpcIsrEvents = SortByTimestamp(_dpcIsrEvents),
     };
+
+    // List<T>.Sort in place beats LINQ's OrderBy().ToList() (which allocates a full second
+    // list, decorated enumerator, and comparer wrapper) once a list is in the hundreds of
+    // thousands of events - the difference that matters when a session import is ~2M rows.
+    private static List<TEvent> SortByTimestamp<TEvent>(List<TEvent> events) where TEvent : BootEvent
+    {
+        events.Sort((a, b) => a.TimestampMs.CompareTo(b.TimestampMs));
+        return events;
+    }
 }

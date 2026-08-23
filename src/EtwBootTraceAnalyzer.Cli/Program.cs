@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using EtwBootTraceAnalyzer.Cli.Reporting;
 using EtwBootTraceAnalyzer.Core.Analysis;
 using EtwBootTraceAnalyzer.Core.Ingestion;
@@ -24,6 +25,8 @@ try
             return RunAnalyze(args[1..]);
         case "compare":
             return RunCompare(args[1..]);
+        case "benchmark":
+            return RunBenchmark(args[1..]);
 #if ETW_CAPTURE
         case "capture":
             return RunCapture(args[1..]);
@@ -108,6 +111,50 @@ static int RunCompare(string[] args)
 
     var comparison = TraceComparer.Compare(beforeReport, afterReport);
     ConsoleReportPrinter.PrintComparison(comparison);
+    return 0;
+}
+
+static int RunBenchmark(string[] args)
+{
+    var eventCount = long.Parse(GetOption(args, "--events") ?? "2000000");
+
+    Console.WriteLine($"Generating a synthetic trace targeting ~{eventCount:N0} events...");
+    var generated = LargeScaleTraceGenerator.Generate(eventCount);
+    var trace = generated.Trace;
+    Console.WriteLine($"  {trace.TotalEventCount:N0} events generated and timestamp-sorted in {generated.GenerationTime.TotalSeconds:F2}s");
+
+    var sw = Stopwatch.StartNew();
+    var report = new BootAnalysisEngine().Analyze(trace, generated.MilestoneThreadId, generated.MilestoneTimeMs);
+    sw.Stop();
+    var topOffender = report.RankedOffenders.Count > 0 ? report.RankedOffenders[0] : null;
+    Console.WriteLine(
+        $"  Critical-path analysis: {sw.Elapsed.TotalMilliseconds:F0} ms -> {report.CriticalPath.Count} hop(s), " +
+        $"{report.CriticalPathTotalMs:F0} ms critical path" +
+        (topOffender is not null ? $", top offender {topOffender.ProcessName} ({topOffender.PercentOfCriticalPath:F1}%)" : ""));
+
+    var dbPath = Path.Combine(Path.GetTempPath(), $"etwboot-benchmark-{Guid.NewGuid():N}.db");
+    try
+    {
+        sw.Restart();
+        using (var store = new SqliteTraceStore(dbPath))
+        {
+            store.Save(trace);
+        }
+        sw.Stop();
+        var saveEventsPerSec = trace.TotalEventCount / Math.Max(sw.Elapsed.TotalSeconds, 0.001);
+        Console.WriteLine($"  SQLite save: {sw.Elapsed.TotalSeconds:F2}s ({saveEventsPerSec:N0} events/sec)");
+
+        sw.Restart();
+        using var reload = new SqliteTraceStore(dbPath);
+        var reloaded = reload.Load(trace.SessionName);
+        sw.Stop();
+        Console.WriteLine($"  SQLite load: {sw.Elapsed.TotalSeconds:F2}s ({reloaded.TotalEventCount:N0} events)");
+    }
+    finally
+    {
+        File.Delete(dbPath);
+    }
+
     return 0;
 }
 
@@ -244,6 +291,11 @@ static void PrintUsage()
               Diff two independently-analyzed traces (e.g. before/after a fix) and report the
               change in critical-path time, overall and per offending process. Paths ending in
               .db/.sqlite need the matching --before-session/--after-session.
+
+          etwboot benchmark [--events <count>]
+              Generate a synthetic trace at the given scale (default ~2,000,000 events) and time
+              generation, critical-path analysis, and SQLite save/load - a real measurement to
+              back up a throughput claim, not an assumed one.
         """);
 #if ETW_CAPTURE
     Console.WriteLine("""
