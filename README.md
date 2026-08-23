@@ -74,6 +74,10 @@ dotnet run --project src/EtwBootTraceAnalyzer.Cli -- analyze --sqlite trace.db -
 # Pick a specific milestone instead of "last thread readied in the trace".
 dotnet run --project src/EtwBootTraceAnalyzer.Cli -- analyze --json trace.json --milestone-process explorer.exe
 
+# Add --html to any of the above to also get a self-contained visual report (critical-path
+# timeline, ranked offenders, disk/DPC tables) - no external CSS/JS, opens standalone in a browser.
+dotnet run --project src/EtwBootTraceAnalyzer.Cli -- demo --html report.html
+
 # Diff two independently-captured traces (e.g. before/after applying a fix) to get an actual
 # improvement number, not just "where did the time go in this one boot".
 dotnet run --project src/EtwBootTraceAnalyzer.Cli -- compare --before before.json --after after.json

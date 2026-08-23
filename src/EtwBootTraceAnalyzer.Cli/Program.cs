@@ -55,6 +55,7 @@ static int RunDemo(string[] args)
     if (report is not null)
     {
         ConsoleReportPrinter.Print(trace, report);
+        WriteHtmlReportIfRequested(args, trace, report);
     }
 
     var saveJson = GetOption(args, "--save-json");
@@ -90,7 +91,19 @@ static int RunAnalyze(string[] args)
     }
 
     ConsoleReportPrinter.Print(trace, report);
+    WriteHtmlReportIfRequested(args, trace, report);
     return 0;
+}
+
+static void WriteHtmlReportIfRequested(string[] args, BootTrace trace, BootAnalysisReport report)
+{
+    var htmlPath = GetOption(args, "--html");
+    if (htmlPath is null)
+    {
+        return;
+    }
+    File.WriteAllText(htmlPath, HtmlReportRenderer.Render(trace, report));
+    Console.WriteLine($"\nWrote HTML report to {htmlPath}");
 }
 
 static int RunCompare(string[] args)
@@ -278,13 +291,15 @@ static void PrintUsage()
         EtwBootTraceAnalyzer - attribute boot/app-launch latency to processes from an ETW trace.
 
         Usage:
-          etwboot demo [--save-json <path>] [--save-sqlite <path>]
+          etwboot demo [--save-json <path>] [--save-sqlite <path>] [--html <path>]
               Run the full pipeline against a built-in synthetic trace. Works on any OS.
 
-          etwboot analyze --json <path> [--milestone-process <name>]
-          etwboot analyze --sqlite <path> --session <name> [--milestone-process <name>]
+          etwboot analyze --json <path> [--milestone-process <name>] [--html <path>]
+          etwboot analyze --sqlite <path> --session <name> [--milestone-process <name>] [--html <path>]
               Analyze a previously captured/exported trace. Without --milestone-process, the
               last thread readied in the trace is used as the boot-complete milestone.
+              --html <path> also writes a self-contained visual report (critical-path timeline,
+              ranked offenders, disk/DPC tables) alongside the console output.
 
           etwboot compare --before <path> --after <path> [--milestone-process <name>]
               [--before-session <name>] [--after-session <name>]
