@@ -125,17 +125,29 @@ etwboot import-etl boot.etl --out trace.json
 inside ~2,000,000 unrelated background CPU-sample events - and times generation, critical-path
 analysis, and SQLite save/load against it. Run on this machine (`-c Release`, 2,000,101 events):
 
+Ranges are the min-max observed across repeated runs on one containerized dev box with shared
+CPU, measured at different times:
+
 | Stage | Time | Throughput |
 |---|---|---|
 | Generate + timestamp-sort | ~0.6-1.1s | - |
-| Critical-path analysis (the differentiator) | ~230-245ms | ~8.5M events/sec scanned |
-| SQLite save | ~7-9.5s | ~215-285K events/sec |
-| SQLite load | ~2.9-3.1s | - |
+| Critical-path analysis (the differentiator) | ~230-330ms | ~6-8.5M events/sec scanned |
+| SQLite save | ~7-13.6s | ~145-285K events/sec |
+| SQLite load | ~2.8-3.2s | - |
 
-Absolute numbers will vary by machine; what's worth taking from this is the *shape*: the
-critical-path walk - the actual novel part - stays under a quarter of a second at 2M events
-because it's indexed, not scanned; SQLite save/load dominates total wall-clock time, which is
-exactly what you'd expect from an I/O-bound step next to an in-memory one.
+**Those ranges are wide on purpose - they're what actually reproduces.** The same benchmark on
+the same box was roughly 2x faster at one point in the day than another, purely from CPU
+contention. Publishing the fastest run as if it were *the* number would be measurement theater,
+so the spread stays visible.
+
+What holds across every run, and is the part worth taking away:
+
+- **The critical-path walk stays comfortably sub-second at 2M events** (230-330ms in every
+  observation) because it's indexed, not scanned. That's an algorithmic property, not a
+  hardware-of-the-day property.
+- **SQLite save/load dominates total wall-clock time by roughly 40x** over the analysis itself -
+  exactly what you'd expect from an I/O-bound step next to an in-memory one. That ratio is stable
+  even as both absolute numbers move.
 
 **A real result, not a claimed one:** the SQLite writer went through two rounds of "obvious"
 optimizations before landing here. Reusing parameter *objects* across rows (instead of
