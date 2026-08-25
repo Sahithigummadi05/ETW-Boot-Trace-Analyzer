@@ -1,6 +1,6 @@
 # EtwBootTraceAnalyzer
 
-[![CI](https://github.com/Sahithigummadi05/project1/actions/workflows/ci.yml/badge.svg?branch=claude/etw-boot-trace-analyzer-ajb2p9)](https://github.com/Sahithigummadi05/project1/actions/workflows/ci.yml)
+[![CI](https://github.com/Sahithigummadi05/ETW-Boot-Trace-Analyzer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Sahithigummadi05/ETW-Boot-Trace-Analyzer/actions/workflows/ci.yml)
 
 Attributes boot (or app-launch) latency to the specific processes and drivers that caused it,
 from an ETW trace. Rather than dumping the kernel event stream, it reconstructs a causal chain:
